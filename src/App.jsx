@@ -48,6 +48,45 @@ function safeParseRecipe(payload) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+function formatHttpError(status, bodyText) {
+  if (status === 429) {
+    let providerHint = ''
+    try {
+      const parsed = JSON.parse(bodyText)
+      const raw = parsed?.error?.metadata?.raw ?? parsed?.error?.message
+      if (typeof raw === 'string' && raw.length > 0) {
+        providerHint = `\n\nДетали: ${raw}`
+      }
+    } catch {
+      /* не JSON — показываем как есть ниже */
+    }
+
+    return [
+      'Лимит запросов (429): бесплатная модель или общий пул OpenRouter временно перегружен.',
+      'Что сделать: подождать 1–2 минуты и повторить; в .env сменить VITE_LLM_MODEL на другую free-модель из каталога OpenRouter;',
+      'либо привязать свой ключ провайдера (BYOK) в настройках OpenRouter — так лимиты считаются отдельно.',
+      'https://openrouter.ai/models (фильтр Free) · https://openrouter.ai/settings/integrations',
+      providerHint,
+    ].join(' ')
+  }
+
+  if (status === 401) {
+    return 'Неверный API-ключ (401). Проверь VITE_LLM_API_KEY в .env или ключ в блоке «Свой API-ключ».'
+  }
+
+  if (status === 402) {
+    return 'Недостаточно кредитов у провайдера (402). Пополни баланс OpenRouter или выбери другую модель.'
+  }
+
+  return `Ошибка API ${status}: ${bodyText.slice(0, 800)}${bodyText.length > 800 ? '…' : ''}`
+}
+
 function formatRecipeText(recipe) {
   const ingredients = recipe.ingredients.map((item) => `- ${item}`).join('\n')
   const steps = recipe.steps.map((step, index) => `${index + 1}. ${step}`).join('\n')
@@ -81,7 +120,8 @@ function App() {
   const [loadingHintIndex, setLoadingHintIndex] = useState(0)
   const [elapsedSec, setElapsedSec] = useState(0)
   const [error, setError] = useState('')
-  const [apiKey, setApiKey] = useState(LLM_ENV.apiKey)
+  /** Только ручное переопределение; ключ из .env сюда не подставляем и не показываем. */
+  const [apiKeyOverride, setApiKeyOverride] = useState('')
   const [baseUrl, setBaseUrl] = useState(LLM_ENV.baseUrl)
   const [model, setModel] = useState(LLM_ENV.model)
   const [filters, setFilters] = useState({
@@ -146,7 +186,7 @@ function App() {
       return
     }
 
-    const resolvedKey = (apiKey.trim() || LLM_ENV.apiKey).trim()
+    const resolvedKey = (apiKeyOverride.trim() || LLM_ENV.apiKey).trim()
     const resolvedBase = (baseUrl.trim() || LLM_ENV.baseUrl).replace(/\/$/, '')
     const resolvedModel = (model.trim() || LLM_ENV.model).trim()
 
@@ -185,35 +225,49 @@ function App() {
 }
 `
 
-    try {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${resolvedKey}`,
-        },
-        body: JSON.stringify({
-          model: resolvedModel,
-          temperature: 0.8,
-          messages: [
-            {
-              role: 'system',
-              content: 'Ты шеф-повар и даешь четкие, реалистичные рецепты.',
-            },
-            {
-              role: 'user',
-              content: prompt,
-            },
-          ],
-        }),
-      })
+    const maxAttempts = 3
 
-      if (!response.ok) {
+    try {
+      let result
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${resolvedKey}`,
+          },
+          body: JSON.stringify({
+            model: resolvedModel,
+            temperature: 0.8,
+            messages: [
+              {
+                role: 'system',
+                content: 'Ты шеф-повар и даешь четкие, реалистичные рецепты.',
+              },
+              {
+                role: 'user',
+                content: prompt,
+              },
+            ],
+          }),
+        })
+
         const details = await response.text()
-        throw new Error(`API error ${response.status}: ${details}`)
+
+        if (response.ok) {
+          result = JSON.parse(details)
+          break
+        }
+
+        if (response.status === 429 && attempt < maxAttempts) {
+          await sleep(2000 * attempt)
+          continue
+        }
+
+        throw new Error(formatHttpError(response.status, details))
       }
 
-      const result = await response.json()
       const content = result?.choices?.[0]?.message?.content
 
       if (!content) {
@@ -222,7 +276,11 @@ function App() {
 
       setRecipe(safeParseRecipe(content))
     } catch (requestError) {
-      setError(requestError.message)
+      const message =
+        requestError instanceof SyntaxError
+          ? 'Некорректный JSON в ответе API. Попробуй другую модель или повтори запрос.'
+          : requestError.message
+      setError(message)
     } finally {
       setIsLoading(false)
     }
@@ -262,7 +320,7 @@ function App() {
 
   return (
     <main className="min-h-screen px-4 py-8 text-slate-900">
-      <div className="mx-auto w-full max-w-5xl rounded-3xl border border-orange-100 bg-white/95 p-6 shadow-xl md:p-10">
+      <div className="mx-auto w-full max-w-screen-2xl rounded-3xl border border-orange-100 bg-white/95 p-6 shadow-xl md:p-10">
         <header className="mb-8">
           <p className="text-sm font-semibold uppercase tracking-[0.25em] text-orange-500">
             React + Tailwind + Vite
@@ -270,7 +328,7 @@ function App() {
           <h1 className="mt-2 text-4xl font-black tracking-tight text-slate-900 md:text-5xl">
             Chef&apos;s Fridge
           </h1>
-          <p className="mt-3 max-w-3xl text-slate-600">
+          <p className="mt-3 max-w-5xl text-slate-600">
             Введи продукты, задай фильтры и получи рецепт от AI. Готовый рецепт можно
             скачать в PDF или отправить в Telegram.
           </p>
@@ -367,48 +425,6 @@ function App() {
                 </select>
               </label>
             </div>
-
-            <details className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-              <summary className="cursor-pointer text-sm font-semibold text-slate-700">
-                API (по умолчанию из .env){' '}
-                {LLM_ENV.apiKey ? (
-                  <span className="font-normal text-emerald-600"> — ключ в .env найден</span>
-                ) : (
-                  <span className="font-normal text-amber-600"> — задай VITE_LLM_API_KEY в .env</span>
-                )}
-              </summary>
-              <p className="text-xs text-slate-500">
-                Файл должен называться <code className="rounded bg-slate-100 px-1">.env</code> в корне
-                проекта (скопируй из <code className="rounded bg-slate-100 px-1">.env.example</code>
-                ). После изменения .env перезапусти <code className="rounded bg-slate-100 px-1">npm run dev</code>.
-              </p>
-              <input
-                value={apiKey}
-                onChange={(event) => setApiKey(event.target.value)}
-                placeholder={LLM_ENV.apiKey ? 'Переопределить ключ (необязательно)' : 'API key'}
-                autoComplete="off"
-                disabled={isLoading}
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100"
-              />
-              <input
-                value={baseUrl}
-                onChange={(event) => setBaseUrl(event.target.value)}
-                placeholder="https://openrouter.ai/api/v1"
-                disabled={isLoading}
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100"
-              />
-              <input
-                value={model}
-                onChange={(event) => setModel(event.target.value)}
-                placeholder="id модели из каталога провайдера"
-                disabled={isLoading}
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-slate-100"
-              />
-              <p className="text-xs text-slate-500">
-                OpenAI, OpenRouter и другие совместимые провайдеры. Поля ниже можно оставить как
-                подставленные из .env или изменить для одного запуска.
-              </p>
-            </details>
 
             <button
               type="button"
@@ -564,6 +580,75 @@ function App() {
             </div>
           </div>
         </section>
+
+        <footer className="mt-10 border-t border-slate-100 pt-6">
+          <details className="group rounded-xl transition-colors open:bg-slate-50/70">
+            <summary className="flex cursor-pointer list-none items-center gap-2 px-1 py-1 text-xs text-slate-500 marker:content-none [&::-webkit-details-marker]:hidden">
+              <span className="text-slate-400 transition group-open:rotate-90" aria-hidden>
+                ▸
+              </span>
+              <span className="font-medium text-slate-600 group-hover:text-slate-800">
+                Свой API-ключ и модель
+              </span>
+              <span className="hidden sm:inline text-slate-400">·</span>
+              <span className="hidden text-slate-400 sm:inline">
+                обычно не нужно — берётся из настроек проекта (.env)
+              </span>
+              {LLM_ENV.apiKey ? (
+                <span className="ml-auto shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-700">
+                  .env ок
+                </span>
+              ) : (
+                <span className="ml-auto shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-800">
+                  проверь .env
+                </span>
+              )}
+            </summary>
+            <div className="mt-3 space-y-3 border-t border-slate-100/80 pt-4 pb-1">
+              <p className="text-[11px] leading-relaxed text-slate-500">
+                Для локальной разработки ключ задаётся в файле{' '}
+                <code className="rounded bg-slate-100 px-1 py-px text-slate-700">.env</code> (см.{' '}
+                <code className="rounded bg-slate-100 px-1 py-px text-slate-700">.env.example</code>
+                ). После правок перезапусти{' '}
+                <code className="rounded bg-slate-100 px-1 py-px text-slate-700">npm run dev</code>.
+                Ниже — только если нужно временно переопределить без правки файла. Значение из{' '}
+                <code className="rounded bg-slate-100 px-1 py-px text-slate-700">.env</code> в поле
+                не подставляется и на экране не показывается.
+              </p>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <input
+                  value={apiKeyOverride}
+                  onChange={(event) => setApiKeyOverride(event.target.value)}
+                  type="password"
+                  name="llm-api-key-override"
+                  autoComplete="off"
+                  placeholder={
+                    LLM_ENV.apiKey ? 'Другой ключ (пусто = только .env)' : 'API key'
+                  }
+                  disabled={isLoading}
+                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-800 placeholder:text-slate-400 disabled:cursor-not-allowed disabled:bg-slate-100 sm:col-span-1"
+                />
+                <input
+                  value={baseUrl}
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                  placeholder="Base URL"
+                  disabled={isLoading}
+                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+                <input
+                  value={model}
+                  onChange={(event) => setModel(event.target.value)}
+                  placeholder="Model id"
+                  disabled={isLoading}
+                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+              </div>
+              <p className="text-[11px] text-slate-400">
+                OpenAI, OpenRouter и другие совместимые эндпоинты.
+              </p>
+            </div>
+          </details>
+        </footer>
       </div>
     </main>
   )
