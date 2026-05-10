@@ -322,10 +322,7 @@ function App() {
     <main className="min-h-screen px-4 py-8 text-slate-900">
       <div className="mx-auto w-full max-w-screen-2xl rounded-3xl border border-orange-100 bg-white/95 p-6 shadow-xl md:p-10">
         <header className="mb-8">
-          <p className="text-sm font-semibold uppercase tracking-[0.25em] text-orange-500">
-            React + Tailwind + Vite
-          </p>
-          <h1 className="mt-2 text-4xl font-black tracking-tight text-slate-900 md:text-5xl">
+          <h1 className="text-4xl font-black tracking-tight text-slate-900 md:text-5xl">
             Chef&apos;s Fridge
           </h1>
           <p className="mt-3 max-w-5xl text-slate-600">

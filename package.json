@@ -1,5 +1,6 @@
 {
   "name": "chefsfridge",
+  "description": "Chef's Fridge — рецепты из продуктов в холодильнике (React, Vite, Tailwind, AI, PDF, Telegram)",
   "private": true,
   "version": "0.0.0",
   "type": "module",
